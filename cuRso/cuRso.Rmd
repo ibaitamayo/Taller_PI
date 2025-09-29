@@ -206,12 +206,12 @@ for (i in vector_example) {
 
 #objetivo: leer el archivo con read.csv, eliminar la primera columna, guardarlo en un archivo de excel utilizando la librería openxlsx.
 
-read_delim("datos/synthetic_data.csv")->tabla
+read_delim("data/synthetic_data.csv")->tabla
 tabla[,-1]->tabla
 
-read_sav("datos/synthetic_data.sav")->de_archivo_spss
+read_sav("data/synthetic_data.sav")->de_archivo_spss
 
-# openxlsx::write.xlsx(tabla,file = "datos/synthetic_data.xlsx")
+# openxlsx::write.xlsx(tabla,file = "data/synthetic_data.xlsx")
 
 #abrir el excel mediante "Import  Dataset"
 
@@ -243,17 +243,17 @@ dbGetQuery(con,query)->dim_acto
 dbDisconnect(con)
 ```
 ```{r Exporting data}
-openxlsx::write.xlsx(tabla,file = "datos/synthetic_data.xlsx")
+openxlsx::write.xlsx(tabla,file = "data/synthetic_data.xlsx")
 write_delim(dim_acto, "output.csv")
 library(haven)
-write_sav(tabla, "datos/synthetic_data.sav")
+write_sav(tabla, "data/synthetic_data.sav")
 ```
 
 
 ### 1.4. Data Manipulation with dplyr and tidyr (1 hour)
 
 ```{r Using dplyr for data manipulation}
-read_sav("datos/synthetic_data_dplyr.sav")->df
+read_sav("data/synthetic_data_dplyr.sav")->df
 
 
 #en los diagnosticos de adultos de más de 18 años, se tarda lo mismo en la consulta que diagnostica la enfermedad codificada en CIE9,CIE10 y CIAP2? lo guardaremos en un archivo que se llama "df_clean" 
@@ -272,7 +272,7 @@ df %>%
   group_by(codtype) %>%
   summarize(tiempo_medio = mean(tiempo_consulta))->df_clean 
 
-# efecto de los datos faltantes
+# efecto de los data faltantes
 df->df2
 df2$tiempo_consulta[sample(dim(df2)[1],1)]<-NA
 
