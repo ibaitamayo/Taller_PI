@@ -1,0 +1,325 @@
+---
+title: "CuRsoRMD"
+output: html_document
+date: "`r Sys.Date()`"
+editor_options: 
+  chunk_output_type: console
+---
+
+# cuRso
+
+```{r loading packages}
+library(tidyverse)
+library(DBI)
+library(odbc)
+library(readxl)
+library(haven)
+library(dplyr)
+```
+
+## Día 2:
+### 2.1. Importación y exportación de datos (45 min)
+
+```{r Reading a file and accessing columns}
+
+#objetivo: leer el archivo con read.csv, eliminar la primera columna y guardar el nuevo conjunto de datos con el mismo nombre "tabla"
+
+read_delim("data/synthetic_data.csv")->tabla
+
+
+read_sav("data/synthetic_data.sav")->de_archivo_spss
+
+
+
+#eliminamos la primera columna
+tabla[,-1]->tabla
+
+#accedemos a la segunda columna
+tabla[,2]
+
+#si conocemos el nombre de la columna, accedemos por el nombre
+tabla$codtype
+
+#para saber los nombres de todas las columnas de un dataframe: colnames()
+colnames(df)
+
+#para ordenar cosas, por ejemplo los nombres de las columnas de un dataframe, sort()
+sort(colnames(df))
+
+# Si ordenamos los nombres de las columnas  alfabéticamente, cuál es el segundo elemento?
+sort(colnames(df))[2]  
+
+#hay algún elemento en las columnas del dataframe que se llame "ID"?
+ "ID"%in%  colnames(df)
+ "id"%in%  colnames(df)
+ 
+# EJERCICIO
+# Escribe en código de R la manera de saber si los nombres de las columnas "codtype"e "ID" están en el dataframe df
+
+ 
+ 
+ # EJERCICIO2:
+ #   guardar el data frame resultante en un archivo de excel utilizando la librería openxlsx.
+ 
+
+ # EJERCICIO3:
+#abrir el archivo de excel que hemos guardado mediante "Import  Dataset"
+
+ # EJERCICIO4:
+ # buscar en internet cuál es la librería que permite que guardemos ese mismo dataframe como un archivo de spss, y conseguir guardarlo
+
+
+
+
+```
+
+```{r Conectarse a una base de datos mediante SQL}
+# con <- dbConnect(odbc(), Driver="SQL Server", Server="server_name", Database="db_name")
+# df_sql <- dbGetQuery(con, "SELECT * FROM patients")
+
+library(DBI)
+library(odbc)
+conexion = "Driver={SQL Server};;SERVER=CENTSQLDES06,51433;DATABASE=Milenia;Trusted_Connection=Yes"
+
+con <- dbConnect(odbc::odbc(), .connection_string = conexion, 
+    timeout = 10)
+query<-"SELECT * FROM [Milenia].[at].[Dim_Acto]"
+# query = "SELECT GRD_Nom, AVG(DATEDIFF(d,CAST(a.HosEst_Fecha_Ingreso as date),CAST(a.HosEst_Fecha_Alta AS date))) AS MediaTiempoGRD
+# FROM [POB_DM].[lr].[TH_Hospitalizacion] a LEFT JOIN
+# [POB_DM].cm.TH_CMBD b ON a.SK_Paciente= b.SK_Paciente AND a.SK_Caso=b.SK_Caso
+# INNER JOIN [POB_DM].[cm].[Dim_GRD] c ON b.SK_GRD_Fin=c.SK_GRD
+# --WHERE GRD_Nom='NEOPLASIAS DE RIÑÓN Y TRACTO URINARIO'
+# GROUP BY GRD_Nom
+# ORDER BY AVG(DATEDIFF(d,CAST(a.HosEst_Fecha_Ingreso as date),CAST(a.HosEst_Fecha_Alta AS date))) DESC"
+
+
+dbGetQuery(con,query)->dim_acto
+
+dbDisconnect(con)
+```
+
+```{r Exporting data}
+openxlsx::write.xlsx(tabla,file = "data/synthetic_data.xlsx")
+write_delim(dim_acto, "output.csv")
+library(haven)
+write_sav(tabla, "data/synthetic_data.sav")
+
+
+```
+
+### 2.2. Manipulación de datos (1 hour)
+
+```{r data manipulation}
+
+read_sav("data/synthetic_data_dplyr.sav")->df
+
+#ejercicio: Sobre esta base de datos vamos a aprender qué hacen las funciones head(), glimpse() y str()
+
+
+# Funciones útiles: table()
+
+# ¿cuántos registros tenemos de cada tipo de código en el conjunto de datos df?
+
+table(df$codtype)
+
+
+#queremos saber si en los diagnosticos de adultos de más de 18 años, se tarda lo mismo en la consulta que diagnostica la enfermedad codificada en CIE9,CIE10 y CIAP2? lo guardaremos en un archivo que se llama "df_clean" 
+# para ello miraremos la media de tiempo de consulta para cada tipo de codificación
+
+
+
+#en los diagnosticos de adultos de más de 18 años,
+df %>%
+  filter(edad > 18)
+
+df %>%
+  filter(edad > 18) %>%
+  group_by(codtype) %>%
+  summarize(tiempo_medio = mean(tiempo_consulta))->df_clean 
+
+# efecto de los data faltantes
+
+df->df2
+df2$tiempo_consulta[sample(dim(df2)[1],1)]<-NA
+
+df2%>%
+  filter(edad > 18) %>%
+  group_by(codtype) %>%
+  summarize(tiempo_medio = mean(tiempo_consulta))->df_clean2 
+
+
+df2%>%
+  filter(edad > 18) %>%
+  group_by(codtype) %>%
+  summarize(tiempo_medio = mean(tiempo_consulta,na.rm=TRUE))->df_clean2 
+df2%>%
+  filter(edad > 18) %>%
+  group_by(codtype) %>%
+  summarize(tiempo_minimo = min(tiempo_consulta,na.rm=TRUE))
+
+df %>%
+  mutate(mayor_de_edad=ifelse(edad <18, "menor de edad", "mayor de edad")) ->dfedad
+
+
+dfedad%>% 
+  group_by(mayor_de_edad,codtype) %>% 
+  summarise(cuantos=n())
+
+table(is.na(df$edad))
+
+```
+
+
+
+```{r Reshaping data}
+df_long <- df %>%
+  pivot_longer(cols=starts_with("fecha"), names_to="evento", values_to="valor")
+
+df_wide<-df_long%>%
+  pivot_wider(names_from = evento, values_from=valor)
+
+df_wide2<-df%>%
+  pivot_wider(names_from = codtype, values_from=cod)
+
+# Cambia el nombre de la columna "9"y "10ES" por CIE9 y CIE10ES
+```
+
+
+### 2.3. Descriptive Statistics (30 min)
+
+```{r}
+cbind(mtcars, price=rnorm(32,35000,8000),feo=sample(x=c("feo","bonito"),size = 32,replace = TRUE))->cars
+
+summary(cars$price)
+quantile(cars$price, probs = c(0.25, 0.5, 0.75))
+hist(cars$price)
+
+```
+
+### 2.4. Hypothesis Testing and Confidence Intervals (45 min)
+
+```{r}
+t.test(price ~ am, data=cars)
+
+chi_test <- chisq.test(table(cars$am, cars$feo))
+chi_test
+
+```
+
+
+
+
+tabla de comparación 
+```{r}
+library(finalfit)
+library(flextable)
+dependent="mayor_de_edad"
+explanatory=c("tiempo_consulta","codtype" )
+dfedad %>% summary_factorlist(dependent, explanatory,p=TRUE, cont = "median")
+
+dfedad %>% summary_factorlist(dependent, explanatory,p=TRUE, cont = "median") %>% regulartable() %>% theme_zebra()
+
+```
+
+
+
+### 2.5. Econometric Models in R (1 hour)
+
+```{r}
+model <- lm(price ~ am + feo + cyl, data=cars)
+summary(model)
+
+```
+
+### 2.6. Visualizaciones personalizadas con ggplot2 (45 min)
+
+
+```{r}
+library(ggplot2)
+
+ggplot(df, aes(x=edad))+geom_density(y="tiempo_consulta")
+ggplot(df, aes(x=edad,color=codtype))+geom_density(y="tiempo_consulta")
+
+ggplot(df, aes(x=edad, y=tiempo_consulta, color=codtype)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_minimal()
+
+# Genera una nueva variable que distinga si un paciente es menor de 25 años o si es mayor de 25 años.  
+
+
+#genera una nueva variable que distinga si un paciente es menor o igual de 25 años, es mayor o igual a 26 años y menor de 70 años o si es mayor o igual de 70 años (encadenar ifelse)
+
+df %>% mutate(grupo_edad3=ifelse(edad<=25,"Menor o igual que 25",ifelse(edad>25 & edad <=70,"entre 26 y 70","mayor de 70")))->df3
+
+# factores: definición de un factor. Variable categórica que toma un valor limitado de niveles.
+
+df3 %>% mutate(factor_edad3=factor(ifelse(edad<=25,0,ifelse(edad>25 & edad <=70,1,2)),levels=c(0,1,2),labels=c("Menor o igual que 25","entre 26 y 70","mayor de 70")))->df4
+
+
+# Genera un gráfico de cajas (boxplot) en el que se vea el tiempo de consulta en función del tio de código
+
+ggplot(df4 , aes(x=codtype, y=tiempo_consulta, fill=factor_edad3))+geom_boxplot()
+
+#elimina de la representación todos los que tienen un NA en la vairable factor_edad3
+df4 %>% filter(is.na(factor_edad3)==FALSE)->df5
+
+ggplot(df5 , aes(x=codtype, y=tiempo_consulta, fill=factor_edad3))+geom_boxplot()
+
+```
+
+
+
+### 2.7. Informes interactivos con Shiny y Flexdashboard (45 min)
+
+```{r}
+library(shiny)
+
+
+#me invento unos costes y los genero como columna
+dfedad %>% mutate(coste=1.1*edad+1.6*tiempo_consulta/rnorm(1,1,0.5)+rnorm(1,300,100))->df_coste
+
+#aquí irá lo que puedo modificar de la página
+ui <- fluidPage(
+  titlePanel("Health Spending"),
+  sidebarLayout(
+    sidebarPanel(sliderInput("tiempo_consulta", " tiempo de consulta", min=3, max=90, value=50)),
+    mainPanel(plotOutput("scatterPlot"))
+  )
+)
+
+# aquí irá el cálculo y lo que me devuelve la página
+server <- function(input, output) {
+  output$scatterPlot <- renderPlot({
+    ggplot(df_coste %>%  filter(!is.na(mayor_de_edad))%>% filter(tiempo_consulta >= input$tiempo_consulta), aes(x=mayor_de_edad, y=coste)) +
+      geom_boxplot() + theme_minimal()
+  })
+}
+
+shinyApp(ui, server)
+
+```
+
+
+### 2.8. Visualización geoespacial con sf y leaflet (45 min)
+
+```{r}
+library(sf)
+library(leaflet)    
+
+navarra <- sf::read_sf("https://github.com/ibaitamayo/utilidades/raw/refs/heads/main/idena.navarra.es_20240111_152358.json")
+navarra$pasta<-rnorm(58,20000,10000)
+pal <- colorNumeric("viridis", NULL)
+leaflet(navarra)  %>%
+  addTiles() %>%
+  addPolygons(stroke = FALSE, smoothFactor = 0.3, fillOpacity = 1,
+    fillColor = ~pal(log10(pasta)),
+    label = ~paste0(CZONA, ": ", formatC(pasta, big.mark = ","))) %>%
+  addLegend(pal = pal, values = ~log10(pasta), opacity = 1.0,
+    labFormat = labelFormat(transform = function(x) round(10^x)))
+
+```
+
+
+
+
