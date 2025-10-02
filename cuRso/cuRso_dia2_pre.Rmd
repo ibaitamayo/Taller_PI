@@ -93,7 +93,7 @@ query<-"SELECT * FROM [Milenia].[at].[Dim_Acto]"
 # ORDER BY AVG(DATEDIFF(d,CAST(a.HosEst_Fecha_Ingreso as date),CAST(a.HosEst_Fecha_Alta AS date))) DESC"
 
 
-dbGetQuery(con,query)->dim_acto
+dbGetQuery(con,query) %>% head(1000)->tabla_consulta_bbdd
 
 dbDisconnect(con)
 ```
