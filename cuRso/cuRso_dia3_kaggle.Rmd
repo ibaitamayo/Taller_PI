@@ -24,7 +24,7 @@ output:
 ## 0. Preparación
 
 ```{r setup, message=FALSE, warning=FALSE}
-# install.packages(c("tidyverse","janitor","corrplot","finalfit","MASS","broom","nnet"))
+install.packages(c("tidyverse","janitor","corrplot","finalfit","MASS","broom","nnet"))
 library(tidyverse); library(janitor); library(corrplot); library(finalfit); library(MASS); library(broom); library(nnet)
 ```
 
@@ -72,7 +72,7 @@ form_full <- as.formula(paste0("`", y, "` ~ ", paste(sprintf("`%s`", cand), coll
 
 no.na.data <- na.omit(df[c(cand, y)])
 mod_full <- lm(form_full, data=no.na.data)
-summary(mod_back)
+summary(mod_full)
 mod_back <- stepAIC(mod_full, direction="backward", trace=FALSE)
 
 summary(mod_back)
@@ -92,6 +92,8 @@ bind_rows(tidy(mod_full) %>% mutate(modelo="full"),
 ```{r finalfit_prep}
 df_ff <- df %>% janitor::clean_names()
 
+
+
 # Mapeo de nombres originales -> limpios para referencia
 tibble(original = names(df), limpio = names(df_ff)) %>% print(n = 50)
 ```
@@ -110,21 +112,29 @@ dependent   <- "high_outcome"
 df_ff %>% finalfit(dependent, explanatory, metrics = TRUE)
 
 ##TIENE SENTIDO??
-df_ff %>% mutate(high_outcome=factor(high_outcome,levels=c(0,1), labels=c("Low outcome","High outcome")))->df_ff
+df_ff %>% mutate(high_outcome=factor(high_outcome,levels=c(0,1), labels=c("Low expectancy","High expectancy")))->df_ff
 
 df_ff %>% summary_factorlist(dependent, explanatory, p = TRUE)%>% regulartable() %>% theme_zebra()
-df_ff %>% finalfit(dependent, explanatory, metrics = TRUE) %>% regulartable() %>% theme_zebra()
+
 
 ```
 
 ### 4.2 Dependiente binaria + **todas** las explicativas numéricas disponibles
 
 ```{r finalfit_bin_all}
-num_cols <- df_ff %>% dplyr::select(where(is.numeric)) %>% names()
+num_cols <- df_ff%>% names()
 explanatory_all <- setdiff(num_cols, "high_outcome")
 dependent <- "high_outcome"
 
-df_ff %>% finalfit(dependent, explanatory_all, metrics = TRUE)
+
+
+df_ff %>% summary_factorlist(dependent, explanatory_all, p = TRUE) %>% regulartable() %>% theme_zebra()
+
+
+
+df %>% filter(Life_expectancy>72)->df_select_bias
+
+df %>%mutate(BMI=ifelse(Population>1251656,BMI,NA))->df_measure_bias
 ```
 
 ### 4.3 Dependiente **multinomial** (≥3 categorías) + todas las explicativas
