@@ -1,0 +1,237 @@
+---
+title: "Día 4: Inferencia causal y aprendizaje automático (Kaggle: Life Expectancy)"
+author: "Curso R para economistas de la salud"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+---
+
+> Dataset base de Kaggle: **Life Expectancy (WHO)**. Archivo esperado: `Life Expectancy Data.csv`.  
+> Relaciona variables de **salud** y **economía** por país y año. Usaremos panel (Country-Year) y crearemos un tratamiento simulado para **DiD**, y exposición binaria para **matching** e **IPTW**.  
+> Restricción de nombres: solo se limpian con `stringr::str_trim()`, `stringr::str_squish()` y `chartr()`.
+
+## 0. Preflight
+
+```{r preflight, echo=TRUE, message=TRUE, warning=FALSE}
+req <- c("tidyverse","stringr","fixest","MatchIt","WeightIt","cobalt",
+         "sandwich","lmtest","broom")
+miss <- req[!sapply(req, requireNamespace, quietly=TRUE)]
+if(length(miss)){
+  stop("Faltan paquetes: ", paste(miss, collapse=", "),
+       ". Instala con install.packages(c(", paste(sprintf('\"%s\"', miss), collapse=", "), ")).")
+}
+f <- "Life Expectancy Data.csv"
+if(!file.exists(f)){
+  stop("No se encontró 'Life Expectancy Data.csv'. Descárgalo de Kaggle y colócalo junto a este Rmd.")
+}
+```
+
+## 1. Carga y limpieza mínima de nombres
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse); library(stringr); library(fixest)
+library(MatchIt); library(WeightIt); library(cobalt)
+library(sandwich); library(lmtest); library(broom);
+library(finalfit);library(flextable)
+
+raw <- readr::read_csv("datos/Life Expectancy Data.csv", show_col_types = FALSE)
+
+# Limpieza mínima: trim + squish + chartr para pasar espacios/símbolos a "_"
+
+names(raw) <- chartr(old=" /-",new="___",x=colnames(raw) %>% str_trim() %>% str_squish())
+names(raw) %>% head()
+
+# Ver columnas clave presentes
+stopifnot(all(c("Country","Year","Life_expectancy","GDP") %in% names(raw)))
+df <- raw %>% filter(!is.na(Country), !is.na(Year)) %>% distinct()
+glimpse(df)
+```
+
+## 2. Diferencias en diferencias (DiD)
+
+Creamos un **tratamiento** para ~30% de países y un periodo **post** a partir de 2010. Outcome: `Life_expectancy`. Control: `GDP`.
+
+```{r did, message=FALSE, warning=FALSE}
+set.seed(123)
+treated <- df %>% distinct(Country) %>% sample_frac(0.30) %>% pull(Country)
+
+panel <- df %>%
+  mutate(treat = as.integer(Country %in% treated),
+         post  = as.integer(Year >= 2010),
+         did   = treat * post)
+
+# TWFE con efectos fijos de país y año
+m_did <- feols(Life_expectancy ~ treat * post + GDP | Country + Year, data = panel, cluster = ~ Country)
+etable(m_did)
+
+# Event-study simple con leads/lags relativos a 2010
+panel <- panel %>% group_by(Country) %>% mutate(rel_year = Year - 2010L) %>% ungroup()
+m_es <- feols(Life_expectancy ~ i(rel_year, treat, ref=-1) + GDP | Country + Year, data=panel, cluster=~Country)
+iplot(m_es, ref.line = 0)
+```
+
+**Lectura:** el coeficiente `treat:post` estima el efecto medio del tratamiento. El gráfico de **event-study** verifica tendencia paralela previa y la dinámica post.
+
+## 3. Matching: 1:1 y 1:2, y diagnóstico de equilibrio
+
+Definimos exposición binaria **exp**: alto gasto sanitario relativo. Usamos `Total_expenditure` si existe; si no, construimos un indicador por encima de la mediana de `GDP` como proxy.
+
+```{r exposure_define}
+exp_var <- if("Total_expenditure" %in% names(df)) "Total_expenditure" else "GDP"
+# dat_m <- df %>% dplyr::select(Country, Year, Life_expectancy, GDP, Schooling = any_of("Schooling"),
+#                        Alcohol = any_of("Alcohol"), Total_expenditure = any_of("Total_expenditure")) %>%
+#   mutate(exp = as.integer(!!sym(exp_var) >= median(!!sym(exp_var), na.rm=TRUE))) %>%
+#   drop_na(Life_expectancy, GDP)  # outcome y covariables mínimas
+# table(dat_m$exp, useNA="ifany")
+
+df %>% mutate(ee=(GDP*Schooling*Life_expectancy/median(Life_expectancy,na.rm = TRUE))*rnorm(1,0.5,0.25)) %>% mutate(exp=factor(ifelse(ee<mean(ee,na.rm=TRUE),0,1),levels=c(0,1),labels=c("Expuesto", "No expuesto")))->dat_m
+
+```
+
+### 3.1 Emparejamiento 1:1
+
+```{r match_1to1}
+set.seed(1)
+m1 <- matchit(exp ~ Population + Alcohol ,
+              data = dat_m, method = "nearest", ratio = 1)
+dat_m[complete.cases(dat_m %>% mutate(exp=as.factor(exp)) %>% dplyr::select(all_of(c("GDP","Schooling","Alcohol","exp","Population")))),]->dat_m_sinNA
+
+m1 <- matchit(exp ~ Population + Alcohol,
+              data = dat_m_sinNA, method = "nearest", ratio = 1)
+
+
+# Figura de equilibrio (cobalt::love.plot)
+love.plot(m1, binary = "std", var.order = "unadjusted",
+          abs = TRUE, thresholds = c(m = .1))
+
+d1 <- match.data(m1)
+att_1to1 <- lm(Life_expectancy ~ exp + Status + Adult_Mortality + BMI , data = d1)
+coeftest(att_1to1, vcov = vcovHC(att_1to1, type="HC1"))
+```
+
+### 3.2 Emparejamiento 1:2
+
+```{r match_1to2}
+set.seed(2)
+m2 <- matchit(exp ~ Population  + Alcohol,
+              data = dat_m_sinNA, method = "nearest", ratio = 5,replace = FALSE)
+summary(m2)
+
+love.plot(m2, binary = "std", var.order = "unadjusted",
+          abs = TRUE, thresholds = c(m = .1))
+
+d2 <- match.data(m2)
+att_1to2 <- lm(Life_expectancy ~ exp + Status + Adult_Mortality + BMI, data = d2)
+coeftest(att_1to2, vcov = vcovHC(att_1to2, type="HC1"))
+```
+
+**Nota:** Compara los **SMD** antes y después. La línea de 0.1 marca buen equilibrio aproximado.
+
+## 4. IPTW (Inverse Probability of Treatment Weighting)
+
+Calculamos puntajes de propensión con logística. Construimos pesos ATE. Estimamos efecto ponderado.
+
+```{r iptw, message=FALSE}
+w <- weightit(exp ~ Population  + Alcohol,
+              data = dat_m_sinNA, method = "ps", estimand = "ATE")
+summary(w)
+
+# Diagnóstico de balance ponderado
+love.plot(w, stats = "mean.diffs", abs = TRUE, thresholds = c(m = .1))
+
+dat_w <- dat_m_sinNA %>% mutate(w = w$weights)
+fit_w <- lm(Life_expectancy ~ exp, data = dat_w, weights = w)
+coeftest(fit_w, vcov = vcovHC(fit_w, type="HC1"))
+```
+
+**Pseudopoblaciones:** El IPTW crea una **pseudopoblación** donde la exposición es “como si” se hubiera asignado al azar dado el conjunto de covariables. Cada observación recibe un **peso** inverso a la probabilidad de su exposición observada; así, los grupos expuesto y no expuesto quedan comparables en covariables.
+
+## 5. Variables instrumentales: eficacia vacunal COVID para ≥65 años
+
+No hay una base Kaggle con vacunación por umbral de 65 dentro de este dataset. Generamos una cohorte **sintética** derivada de `df` para ilustrar un diseño con **instrumento de elegibilidad ≥65** y **período post**.
+
+```{r iv_synthetic_setup}
+set.seed(2024)
+
+# Creamos n individuos por país-año (reducción para rapidez)
+base <- df %>% filter(!is.na(GDP), !is.na(Life_expectancy)) %>%
+  group_by(Country, Year) %>% slice_head(n = 1) %>% ungroup() %>%
+  mutate(n = pmin(50L, 5L + as.integer(scales::rescale(GDP, to=c(5,50), from=range(GDP, na.rm=TRUE)))))
+
+sim <- base %>%
+  rowwise() %>%
+  do({
+    n <- .$n
+    tibble(Country = .$Country,
+           Year = .$Year,
+           gdp = .$GDP,
+           le  = .$Life_expectancy,
+           age = round(runif(n, 50, 85),0))
+  }) %>% ungroup()
+
+# Política de elegibilidad a vacuna para >=65 (instrumento Z)
+sim <- sim %>%
+  mutate(post = as.integer(Year >= 2010),          # proxy de periodo de despliegue
+         eligible65 = as.integer(age >= 65),
+         Z = eligible65 * post)                    # instrumento: elegible en post
+
+# Tratamiento (vacunado) influido por Z y covariables
+invlogit <- function(x) 1/(1+exp(-x))
+sim <- sim %>%
+  mutate(p_vax = invlogit(-1 + 1.2*Z + 0.4*eligible65 + 0.2*scale(gdp)),
+         vacc = rbinom(n(), 1, pmax(pmin(p_vax, 0.99), 0.01)))
+
+# Outcome binario: hospitalización COVID (menor con vacuna)
+sim <- sim %>%
+  mutate(p_y = invlogit(-0.2 - 0.8*vacc + 0.02*(age-65) - 0.2*scale(gdp)),
+         hosp = rbinom(n(), 1, pmax(pmin(p_y, 0.99), 0.01)))
+```
+
+**Gráficos para entender el instrumento**
+
+```{r iv_plots, fig.width=7, fig.height=5}
+library(ggplot2)
+
+# Tasa de vacunación por edad
+sim %>%
+  group_by(age) %>% summarise(vax_rate = mean(vacc), .groups="drop") %>%
+  ggplot(aes(age, vax_rate)) + geom_line() +
+  labs(title="Tasa de vacunación por edad", y="Proporción vacunado")
+
+# Efecto del instrumento (elegibilidad ≥65) en vacunación
+sim %>%
+  group_by(eligible65, post) %>% summarise(vax_rate = mean(vacc), .groups="drop") %>%
+  mutate(eligible65 = factor(eligible65, labels=c("<65","≥65"))) %>%
+  ggplot(aes(interaction(eligible65, post, sep=","), vax_rate)) +
+  geom_col() + labs(x="Elegibilidad,Post", y="Proporción vacunado",
+                    title="Instrumento: elegibilidad ≥65 y periodo post")
+```
+
+**Estimación IV (2SLS) con `fixest`)**
+
+```{r iv_estimation}
+# Primera etapa
+fe1 <- feols(vacc ~ Z + age + gdp, data = sim, cluster = ~ Country)
+etable(fe1)
+
+# Segunda etapa: hosp ~ vacc instrumentado por Z (controlando edad y gdp)
+iv <- feols(hosp ~ 1 | vacc ~ Z + age + gdp, data = sim, cluster = ~ Country)
+etable(iv, dict = c("vacc"="Vacunación"), signif.code = NA)
+```
+
+## 6. Tareas
+
+1) Repite el DiD variando el año de política (2008, 2012).  
+2) Matching con 1:1 y 1:2 cambiando covariables. Exporta los **love plots**.  
+3) IPTW: interpreta la **pseudopoblación** y compara balance antes/después.  
+4) IV: modifica la fuerza del instrumento variando el umbral de edad (p. ej., 60). Observa la primera etapa.

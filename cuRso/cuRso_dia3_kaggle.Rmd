@@ -1,0 +1,219 @@
+---
+title: "Día 3: Análisis estadístico para economía de la salud (Kaggle Life Expectancy)"
+author: "Curso R para economistas de salud"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+---
+
+
+
+> Dataset: **Life Expectancy (WHO)** de Kaggle. Archivo esperado: `Life Expectancy Data.csv`  
+> Este Rmd usa **los nombres originales de columnas**. Para `finalfit` se crea una **copia** con nombres seguros (`df_ff`), sin modificar el original.
+
+## 0. Preparación
+
+```{r setup, message=FALSE, warning=FALSE}
+# install.packages(c("tidyverse","janitor","corrplot","finalfit","MASS","broom","nnet"))
+library(tidyverse); library(janitor); library(corrplot); library(finalfit); library(MASS); library(broom); library(nnet)
+```
+
+## 1. Carga y exploración (sin renombrar columnas)
+
+```{r carga}
+
+df <- readr::read_csv("datos/Life Expectancy Data.csv", show_col_types = FALSE)
+
+# Vista de nombres EXACTOS
+names(df)
+glimpse(df)
+summary(df)
+
+colnames(df)<-chartr(old=" /-",new= "___",x=stringr::str_squish(colnames(df)))
+```
+
+Columnas clave (nombres originales típicos en el CSV de Kaggle):  
+- `Country`, `Year`, `Status`  
+- Life_expectancy *(nota: incluye un espacio final)*  
+- `Adult Mortality`, `Alcohol`, `Total expenditure`, `GDP`, `Population`,  
+  ` BMI `, `Schooling`, `Income composition of resources`, `Hepatitis B`, `Polio`, `Diphtheria `, `HIV/AIDS`, etc.
+
+## 2. Correlación y heatmap (variables numéricas relevantes)
+
+```{r correlacion, fig.width=7, fig.height=6}
+# Selección robusta a existencia real en tu CSV
+keep<-c("Life_expectancy","Adult_Mortality","Alcohol","Total_expenditure","GDP","Population","BMI","Schooling","Income_composition_of_resources")
+num_df <- df %>% dplyr::select(any_of(keep)) %>% dplyr::select(where(is.numeric))
+
+# Matriz de correlación
+M <- cor(num_df, use="pairwise.complete.obs")
+corrplot(M, method="color", type="upper", tl.col="black", addCoef.col="black")
+```
+
+## 3. Regresión lineal multivariante con selección hacia atrás (backward)
+
+```{r lm_backward}
+# Dependiente: Life_expectancy
+y <- "Life_expectancy"
+cand <- c("Adult_Mortality","Alcohol","Total_expenditure","GDP","Population","BMI","Schooling","Income_composition_of_resources")
+cand <- intersect(cand, names(df))
+form_full <- as.formula(paste0("`", y, "` ~ ", paste(sprintf("`%s`", cand), collapse=" + ")))
+
+
+no.na.data <- na.omit(df[c(cand, y)])
+mod_full <- lm(form_full, data=no.na.data)
+summary(mod_back)
+mod_back <- stepAIC(mod_full, direction="backward", trace=FALSE)
+
+summary(mod_back)
+
+# Comparación de coeficientes
+bind_rows(tidy(mod_full) %>% mutate(modelo="full"),
+          tidy(mod_back) %>% mutate(modelo="backward")) %>%
+  arrange(term, modelo)
+```
+
+## 4. Modelos con `finalfit`
+
+> `finalfit` construye fórmulas internamente y necesita nombres sintácticos.  
+> Se crea una **copia** con nombres seguros: `df_ff <- janitor::clean_names(df)`.
+> El dataset original `df` se mantiene sin cambios.
+
+```{r finalfit_prep}
+df_ff <- df %>% janitor::clean_names()
+
+# Mapeo de nombres originales -> limpios para referencia
+tibble(original = names(df), limpio = names(df_ff)) %>% print(n = 50)
+```
+
+### 4.1 Dependiente binaria + 3 explicativas
+
+```{r finalfit_bin_3}
+library(flextable)
+# Binaria: alta/baja expectativa de vida (corte en la mediana)
+cutp <- median(df_ff$life_expectancy, na.rm=TRUE)
+df_ff <- df_ff %>% mutate(high_outcome = if_else(life_expectancy >= cutp, 1L, 0L))
+
+explanatory <- c("gdp","total_expenditure","alcohol")  # presentes en el CSV
+dependent   <- "high_outcome"
+
+df_ff %>% finalfit(dependent, explanatory, metrics = TRUE)
+
+##TIENE SENTIDO??
+df_ff %>% mutate(high_outcome=factor(high_outcome,levels=c(0,1), labels=c("Low outcome","High outcome")))->df_ff
+
+df_ff %>% summary_factorlist(dependent, explanatory, p = TRUE)%>% regulartable() %>% theme_zebra()
+df_ff %>% finalfit(dependent, explanatory, metrics = TRUE) %>% regulartable() %>% theme_zebra()
+
+```
+
+### 4.2 Dependiente binaria + **todas** las explicativas numéricas disponibles
+
+```{r finalfit_bin_all}
+num_cols <- df_ff %>% dplyr::select(where(is.numeric)) %>% names()
+explanatory_all <- setdiff(num_cols, "high_outcome")
+dependent <- "high_outcome"
+
+df_ff %>% finalfit(dependent, explanatory_all, metrics = TRUE)
+```
+
+### 4.3 Dependiente **multinomial** (≥3 categorías) + todas las explicativas
+
+```{r finalfit_multinomial}
+df_ff <- df_ff %>% mutate(
+  health_status = cut(life_expectancy,
+                      breaks = quantile(life_expectancy, probs=c(0,.33,.66,1), na.rm = TRUE),
+                      include.lowest = TRUE,
+                      labels = c("Low","Medium","High"))
+)
+
+dependent_uni   <- "health_status"
+explanatory_uni <- setdiff(names(df_ff), c(dependent_uni,"life_expectancy","high_outcome"))
+
+df_ff %>% summary_factorlist(dependent_uni, explanatory_uni, p=TRUE) %>% regulartable() %>% theme_zebra()
+```
+
+## 5. Sesgos y confusores
+
+### 5.1 Sesgo de selección por datos faltantes
+
+```{r sesgo_seleccion}
+vars_clave <- c("Life_expectancy","GDP","Total_expenditure","Schooling","Population")
+df_sel <- df %>% dplyr::select(any_of(vars_clave))
+
+df_sel %>% summarise(across(everything(), ~mean(is.na(.))))
+
+cc <- complete.cases(df_sel)
+df %>% mutate(incluido = if_else(cc, "Incluido","Excluido")) %>%
+  group_by(incluido) %>%
+  summarise(n=n(),
+            life_mean = mean(Life_expectancy, na.rm=TRUE),
+            gdp_mean  = mean(GDP, na.rm=TRUE),
+            school_mean = mean(Schooling, na.rm=TRUE))
+```
+
+### 5.2 Confusores (modelo crudo vs ajustado)
+
+```{r confusores}
+# Exposición: alcohol -> Resultado: high_outcome (en df_ff)
+m_crude <- glm(high_outcome ~ alcohol, data=df_ff, family=binomial)
+
+m_adj <- glm(high_outcome ~ alcohol + gdp + total_expenditure + schooling + income_composition_of_resources,
+             data=df_ff, family=binomial)
+
+or_tab <- function(m) broom::tidy(m, conf.int=TRUE, exponentiate=TRUE) %>% filter(term!="(Intercept)")
+list(OR_crudo = or_tab(m_crude), OR_ajustado = or_tab(m_adj))
+```
+
+## 6. Actividad integradora 3.8 (
+
+### 6.1 Enunciado
+1) Cuantifica **sesgo de selección** por datos faltantes en Life_expectancy, `GDP`, `Total expenditure`, `Schooling`, `Population`.  
+2) Ilustra **sesgo de medición** comparando medias de `Alcohol` por `Status`.  
+3) Estima modelo **crudo** y **ajustado** para `high_outcome` con exposición `alcohol` y confusores (`gdp`, `total_expenditure`, `schooling`, `income_composition_of_resources`).  
+4) Resume hallazgos.
+
+### 6.2 Código
+
+```{r ejercicio_3_8}
+# (1) Selección
+vars <- c("Life_expectancy","GDP","Total_expenditure","Schooling","Population")
+df_sel <- df %>% dplyr::select(any_of(vars))
+miss_rate <- df_sel %>% summarise(across(everything(), ~mean(is.na(.)))); miss_rate
+
+cc <- complete.cases(df_sel)
+incl_excl <- df %>% mutate(incluido = if_else(cc,"Incluido","Excluido")) %>%
+  group_by(incluido) %>%
+  summarise(n=n(),
+            life_mean = mean(Life_expectancy, na.rm=TRUE),
+            gdp_mean  = mean(GDP, na.rm=TRUE),
+            school_mean = mean(Schooling, na.rm=TRUE))
+incl_excl
+
+# (2) Medición por Status (si existe)
+if("Status" %in% names(df)){
+  by_status <- df %>% group_by(Status) %>%
+    summarise(across(any_of(c("Alcohol","Total expenditure","Schooling")), ~mean(., na.rm=TRUE)))
+  by_status
+}
+
+# (3) Confusión: crudo vs ajustado (ya definido en 5.2)
+or_crude <- broom::tidy(m_crude, conf.int=TRUE, exponentiate=TRUE) %>% filter(term=="alcohol")
+or_adj   <- broom::tidy(m_adj,   conf.int=TRUE, exponentiate=TRUE) %>% filter(term=="alcohol")
+list(OR_crudo = or_crude, OR_ajustado = or_adj)
+```
+
+### 6.3 Respuestas orientativas
+- **Selección:** si el grupo “Excluido” muestra menor `GDP` y `Schooling`, la eliminación de incompletos sesga la media de Life_expectancy. Considerar imputación o análisis de sensibilidad.  
+- **Medición:** diferencias por `Status` sugieren cobertura/registro distinto; ajustar por `Status` o estratificar.  
+- **Confusores:** si el OR de `alcohol` se atenúa tras ajustar por `gdp`, `total_expenditure`, `schooling`, `income_composition_of_resources`, hay confusión. Reporta OR crudo y ajustado con IC95%.

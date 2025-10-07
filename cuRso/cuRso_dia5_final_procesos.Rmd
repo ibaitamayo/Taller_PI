@@ -1,0 +1,260 @@
+---
+title: "Día 5 (final): Minería de procesos + Proyecto integrador"
+author: "Curso R para economistas de la salud"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+---
+
+> Datasets Kaggle requeridos:
+> - **Life Expectancy (WHO)** → archivo `Life Expectancy Data.csv` (salud + economía).  
+> - **Event log** de asistencia sanitaria (escoge uno):  
+>   - *Event Log of Hospital* → `ArtificialPatientTreatment.csv` (tratamientos por paciente).  
+>   - *Sepsis Treatment Careflow* → `sepsis_cases.csv` (eventos de sepsis).  
+> Coloca los CSV en el mismo directorio que este Rmd.
+>
+> Restricción: solo se permiten cambios en nombres de columnas mediante `stringr::str_trim()`, `stringr::str_squish()` y `chartr()` para convertir espacios/símbolos en `_`.
+
+> Referencias de datasets: Life Expectancy (WHO) y Event logs hospitalarios en Kaggle.
+
+## 0. Preflight
+
+```{r preflight, echo=TRUE, message=TRUE, warning=FALSE}
+req <- c("tidyverse","stringr","janitor","finalfit","MASS","broom",
+         "bupaR","processmapR","edeaR","processanimateR","lubridate")
+miss <- req[!sapply(req, requireNamespace, quietly=TRUE)]
+if(length(miss)){
+  stop("Faltan paquetes: ", paste(miss, collapse=", "),
+       ". Instala con install.packages(c(", paste(sprintf('"%s"', miss), collapse=", "), ")).")
+}
+
+# Archivos esperados
+f_demo <- "Life Expectancy Data.csv"
+f_hosp1 <- "ArtificialPatientTreatment.csv"
+f_hosp2 <- "sepsis_cases.csv"
+
+if(!file.exists(f_demo)){
+  stop("No se encuentra 'Life Expectancy Data.csv' (Kaggle WHO).")
+}
+if(!file.exists(f_hosp1) && !file.exists(f_hosp2)){
+  stop("No se encuentra un log de procesos. Descarga 'ArtificialPatientTreatment.csv' o 'sepsis_cases.csv' de Kaggle.")
+}
+```
+
+## 1. Proyecto integrador: tabla de características y regresión logística
+
+### 1.1 Carga y limpieza mínima
+
+```{r carga_demo, message=FALSE}
+library(tidyverse); library(stringr); library(janitor)
+
+# Carga
+df0 <- readr::read_csv("datos/Life Expectancy Data.csv", show_col_types = FALSE)
+
+# Limpieza mínima de NOMBRES con str_trim, str_squish y chartr
+
+names(df0) <- chartr(old=" /-",new="___",x=tolower(str_trim(str_squish(colnames(df0))))) 
+# Mantener dataset original para trazabilidad
+
+df<-df0
+```
+
+### 1.2 Variable dicotómica de exposición y tabla `summary_factorlist()`
+
+```{r finalfit_tabla, message=FALSE}
+library(finalfit)
+
+# Si no existe una variable exposición binaria, la creamos de forma aleatoria estable reproducible
+set.seed(123)
+if(!"expo_bin" %in% names(df)){
+  # usa una combinación de columnas numéricas para variar probabilidad
+  base_p <- scale(df$gdp, center=TRUE, scale=TRUE)
+  base_p[is.na(base_p)] <- 0
+  p <- pmin(pmax(0.5 + 0.15*base_p, 0.05), 0.95)
+  df$expo_bin <- rbinom(nrow(df), 1, p)
+}
+
+# Variable resultado binaria: alta expectativa de vida (tercil superior vs resto)
+q66 <- quantile(df$life_expectancy, probs=0.66, na.rm=TRUE)
+df %>% mutate(high_outcome=factor(ifelse(df$life_expectancy >= q66, 1, 0),levels=c(0,1),labels=c("High Income", "Low Income")))->df
+df$lepra=sample(size = dim(df)[1],replace = TRUE, x=c("Yes", "No"))
+
+# Variables candidatas (presentes en el CSV original)
+vars_candidatas <- c("gdp","total_expenditure","alcohol","schooling",
+                     "income_composition_of_resources","population","lepra")
+vars_candidatas <- intersect(vars_candidatas, names(df))
+
+# Tabla 1 con columna de totales
+tabla1 <- df %>%
+  finalfit::summary_factorlist(dependent = "high_outcome",
+                               explanatory = vars_candidatas,
+                               add_dependent_label = TRUE,
+                               column = TRUE, # añade columna de totales
+                               p = TRUE,
+                               na_include = TRUE)
+tabla1 %>% knitr::kable()
+```
+
+### 1.3 Selección de variables significativas y modelo logístico (backward)
+
+```{r logistic_backward, message=FALSE}
+library(MASS); library(broom)
+
+# Variables con p < 0.05 en la tabla
+sig_vars <- tabla1 %>%mutate(p=ifelse(p=="<0.001",0.001,p)) %>% 
+  dplyr::filter(!is.na(p)) %>%
+  dplyr::filter(as.numeric(p) < 0.05) %>% dplyr::select("Dependent: high_outcome")
+sig_vars <-sig_vars[[1]]
+if(length(sig_vars) == 0){
+  sig_vars <- intersect(c("gdp","total_expenditure","schooling"), names(df))
+}
+
+formula_full <- as.formula(paste0("high_outcome ~ ", paste(sig_vars, collapse = " + ")))
+m_full <- glm(formula_full, data = df, family = binomial)
+m_back <- stepAIC(m_full, direction = "backward", trace = FALSE)
+
+or_tab <- broom::tidy(m_back, conf.int = TRUE, exponentiate = TRUE)
+or_tab %>% dplyr::filter(term != "(Intercept)") %>% knitr::kable()
+```
+
+## 2. Minería de procesos con datos hospitalarios
+
+### 2.1 Definiciones
+- **Evento:** ocurrencia registrada de una **actividad** en un momento dado.
+- **Instancia (caso):** unidad de proceso que agrupa eventos relacionados.
+- **Actividad:** tipo de acción realizada (p. ej., Admission, Lab test, Discharge).
+- **Recurso:** entidad que ejecuta la actividad (persona/servicio/equipo).
+- **Traza:** secuencia ordenada de actividades para un caso.
+- **Atributos:** información adicional de eventos/casos (coste, duración, servicio).
+
+### 2.2 Carga del log y estandarización mínima
+
+```{r carga_log, message=FALSE}
+library(bupaR); library(processmapR); library(edeaR); library(lubridate)
+
+log_file <- if(file.exists("ArtificialPatientTreatment.csv")) "ArtificialPatientTreatment.csv" else "sepsis_cases.csv"
+elog0 <- readr::read_csv(log_file, show_col_types = FALSE)
+
+names(elog0) <- clean_names(names(elog0))
+
+cands_case <- intersect(names(elog0), c("case","case_id","patient","patient_id","trace","id","encounter"))
+cands_act  <- intersect(names(elog0), c("activity","activity_name","task","event","event_name","treatment"))
+cands_time <- intersect(names(elog0), c("timestamp","time","event_time","datetime","start_time","complete_time","date"))
+cands_res  <- intersect(names(elog0), c("resource","resource_id","resource_name","org_group","staff","user"))
+cands_cost <- intersect(names(elog0), c("cost","costs","amount","price","charge"))
+
+stopifnot(length(cands_case)>0, length(cands_act)>0, length(cands_time)>0)
+
+elog <- elog0 %>%
+  dplyr::mutate(
+    .case_id  = .data[[cands_case[1]]],
+    .activity = as.character(.data[[cands_act[1]]]),
+    .ts_raw   = .data[[cands_time[1]]],
+    .resource = if(length(cands_res)>0) as.character(.data[[cands_res[1]]]) else NA_character_,
+    .cost     = if(length(cands_cost)>0) as.numeric(.data[[cands_cost[1]]]) else NA_real_
+  ) %>%
+  dplyr::mutate(timestamp = suppressWarnings(lubridate::as_datetime(.ts_raw))) %>%
+  dplyr::filter(!is.na(timestamp))
+
+if(all(is.na(elog$cost))){
+  set.seed(42)
+  act_costs <- elog %>% distinct(.activity) %>% mutate(base = runif(n(), 50, 500))
+  elog <- elog %>% left_join(act_costs, by = ".activity") %>% mutate(cost = base) %>% select(-base)
+}
+
+case_cost <- elog %>% group_by(.case_id) %>% summarise(total_cost = sum(cost, na.rm=TRUE), .groups="drop")
+median_cost <- median(case_cost$total_cost, na.rm=TRUE)
+case_cost <- case_cost %>% mutate(high_cost = if_else(total_cost >= median_cost, "High","Low"))
+elog <- elog %>% left_join(case_cost, by = ".case_id")
+```
+
+### 2.3 Eventlog y perfiles
+
+```{r eventlog_build, message=FALSE}
+elog_bupa <- elog %>%
+  rename(activity_id = .activity, case_id = .case_id, resource_id = .resource) %>%
+  eventlog(
+    case_id = "case_id",
+    activity_id = "activity_id",
+    timestamp = "timestamp",
+    resource_id = if("resource_id" %in% names(.)) "resource_id" else NULL
+  )
+elog_bupa %>% summary()
+```
+
+### 2.4 Mapas y métricas por grupo dicotómico
+
+```{r process_maps, message=FALSE, fig.width=7, fig.height=5}
+library(ggplot2)
+
+tpt <- throughput_time(elog_bupa, level_of_aggregation = "case") %>%
+  left_join(case_cost, by = c("case_id"="case_id"))
+ggplot(tpt, aes(x = throughput_time, fill = high_cost)) + geom_histogram(bins = 30, position="identity", alpha=.6) +
+  labs(title="Distribución de throughput time por grupo de coste", x="Tiempo total de caso", y="Casos")
+
+pm_high <- process_map(elog_bupa %>% filter_case(elog_bupa, cases = case_cost %>% filter(high_cost=="High") %>% pull(case_id)))
+pm_low  <- process_map(elog_bupa %>% filter_case(elog_bupa, cases = case_cost %>% filter(high_cost=="Low") %>% pull(case_id)))
+pm_high
+pm_low
+```
+
+### 2.5 Animación (processanimateR)
+
+```{r process_animation, message=FALSE, results='asis'}
+library(processanimateR)
+g <- process_map(elog_bupa)
+pa <- processanimateR::animate_process(elog_bupa, g, duration = 10,
+                                       legend = "right",
+                                       mapping = token_aes(color = high_cost))
+pa
+```
+
+### 2.6 Indicadores para cuadros de mando
+
+```{r dashboard_metrics, message=FALSE}
+act_freq <- activity_frequency(elog_bupa, level_of_aggregation = "activity") %>% arrange(desc(absolute))
+act_freq %>% head(10) %>% knitr::kable()
+
+act_durations <- processing_time(elog_bupa, level_of_aggregation = "activity") %>% arrange(desc(mean))
+act_durations %>% head(10) %>% knitr::kable()
+
+trace_var <- trace_coverage(elog_bupa)
+trace_var %>% knitr::kable()
+```
+
+## 3. Matching e IPTW (WHO) — ejemplos con love plots
+
+```{r causal_quick, message=FALSE}
+dat_m <- df %>% select(high_outcome, expo_bin, gdp, schooling, total_expenditure, alcohol) %>% drop_na()
+
+# 1:1
+set.seed(1)
+m1 <- MatchIt::matchit(expo_bin ~ gdp + schooling + total_expenditure + alcohol,
+                       data = dat_m, method = "nearest", ratio = 1)
+cobalt::love.plot(m1, binary = "std", abs = TRUE, thresholds = c(m=.1))
+
+# 1:2
+set.seed(2)
+m2 <- MatchIt::matchit(expo_bin ~ gdp + schooling + total_expenditure + alcohol,
+                       data = dat_m, method = "nearest", ratio = 2)
+cobalt::love.plot(m2, binary = "std", abs = TRUE, thresholds = c(m=.1))
+
+# IPTW (ATE)
+w <- WeightIt::weightit(expo_bin ~ gdp + schooling + total_expenditure + alcohol,
+                        data = dat_m, method = "ps", estimand = "ATE")
+cobalt::love.plot(w, stats = "mean.diffs", abs = TRUE, thresholds = c(m=.1))
+```
+
+## 4. Notas
+- WHO + logs permiten métricas clínicas y económicas para cuadros de mando y decisiones.  
+- Las animaciones y mapas ayudan a detectar cuellos de botella y priorizar recursos.
