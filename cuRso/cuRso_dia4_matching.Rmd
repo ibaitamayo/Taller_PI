@@ -72,6 +72,49 @@ Para generar una sección en la que se pueda ejecutar código pulsa simultáneam
 
 ¿Qué indica esta variable?
 
+```{r}
+df<-read.csv("datos/diabetic_data.csv")
+
+df %>% mutate(complication_bin=ifelse(readmitted == "<30","1","0"))->dff
+
+explanatory=c("age_mid", "gender", "race", "time_in_hospital", "num_lab_procedures", "num_medications", "number_diagnoses", "insulin", "change", "payer_code")
+
+dff %>% summary_factorlist(dependent ="complication_bin",explanatory,p=TRUE) %>% flextable::regulartable() %>% flextable::theme_zebra()
+
+
+c("age_mid", "race", "time_in_hospital", "num_lab_procedures", "num_medications", "number_diagnoses", "insulin", "change", "payer_code")
+
+modelo_completo<-glm(as.numeric(complication_bin)~age_mid+ race+ time_in_hospital+ num_lab_procedures+ num_medications+ number_diagnoses+ insulin+ change+ payer_code,family = binomial,data = dff)
+
+dff %>%
+  mutate(insulin=factor(ifelse(insulin=="No",
+                               0,
+                               ifelse(insulin=="Down",
+                                      1,
+                                      ifelse(insulin=="Steady",2,3))),
+                        levels=c(0:3), labels = c("No","poco", "medio", "mucho")))->dff
+
+
+modelo_completo<-glm(as.numeric(complication_bin)~age_mid+ race+ time_in_hospital+ num_lab_procedures+ num_medications+ number_diagnoses+ insulin+ change+ payer_code,family = binomial,data = dff)
+summary(modelo_completo)
+
+
+
+modelo_adj1<-glm(as.numeric(complication_bin)~age_mid+ race+ time_in_hospital+ num_medications+ number_diagnoses+ insulin+ change+ payer_code,family = binomial,data = dff)
+summary(modelo_adj1)
+
+
+
+
+modelo_adj2<-glm(as.numeric(complication_bin)~ race+ time_in_hospital+ num_medications+ number_diagnoses+ insulin+ change+ payer_code,family = binomial,data = dff)
+summary(modelo_adj2)
+
+table(dff$race)
+
+table(dff$insulin)
+
+```
+
 2.  **Explicativas y tipos**
 
             Objetivo: elegir clínicas, demográficas y económicas plausibles; fijar tipos.
@@ -243,8 +286,6 @@ barplot(rev(bal_12$SMD), horiz=TRUE, las=1, names.arg = rev(bal_12$variable),
 par(op)
 ```
 
-
-
 ## 5. Matching con MatchIt y visualización del equilibrio con cobalt — **código completo**
 
 ```{r matching, message=TRUE, warning=FALSE}
@@ -307,8 +348,6 @@ rates <- dplyr::bind_rows(
 )
 rates
 ```
-
-
 
 ```{r}
 library(readr); library(dplyr); library(stringr)
@@ -375,4 +414,3 @@ print(rates)
 
 
 ```
-
