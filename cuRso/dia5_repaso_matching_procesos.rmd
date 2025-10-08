@@ -1,0 +1,304 @@
+---
+title: "Día 5: Repaso, Matching y Minería de Procesos"
+author: "Curso R para economistas de la salud"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Parte 1 · Resultados del día anterior: OR ajustados
+
+## Objetivos
+
+-   Cargar datos.
+-   Análisis univariante.
+-   Ajuste logístico y obtención de **odds ratios**.
+-   Visualización tipo forest.
+
+## Tabla de funciones
+
+| Función                       | Librería  | Propósito                | Ejemplo mínimo                                                              |
+|------------------|------------------|------------------|------------------|
+| `read.csv`                    | base      | Cargar CSV               | `df <- read.csv("datos/diabetic_data.csv")`                                 |
+| `mutate`, `if_else`           | dplyr     | Derivar variables        | `dff <- df %>% mutate(complication_bin=if_else(readmitted=="<30","1","0"))` |
+| `summary_factorlist`          | finalfit  | Univariantes con p       | `summary_factorlist("complication_bin", explanatory, p=TRUE)`               |
+| `glm`                         | stats     | Regresión logística      | `glm(as.numeric(y)~x1+x2, family=binomial, data=dff)`                       |
+| `tidy`                        | broom     | OR e IC95%               | `tidy(fit, conf.int=TRUE, exponentiate=TRUE)`                               |
+| `regulartable`, `theme_zebra` | flextable | Formateo de tablas       | `flextable::regulartable(x) %>% flextable::theme_zebra()`                   |
+| `plot_model`, `tab_model`     | sjPlot    | Forest y tabla de modelo | `plot_model(fit, p.val="wald")`                                             |
+| `str_trim`, `str_squish`      | stringr   | Limpieza de nombres      | `names(df) <- str_squish(str_trim(names(df)))`                              |
+| `chartr`                      | base      | Sustituir símbolos       | `names(df) <- chartr(" /-()", "_____ ", names(df))`                         |
+
+## Código (ejecutable)
+
+```{r}
+library(dplyr)
+library(finalfit)
+library(flextable)
+library(broom)
+library(ggplot2)
+library(sjPlot)
+library(stringr)
+
+df <- read.csv("datos/diabetic_data.csv", stringsAsFactors = FALSE)
+
+names(df) <- chartr(" /-","___", str_squish(str_trim(names(df))))
+dff <- df %>% mutate(complication_bin = ifelse(readmitted == "<30","1","0"))
+
+explanatory <- c("age_mid","gender","race","time_in_hospital","num_lab_procedures",
+                 "num_medications","number_diagnoses","insulin","change","payer_code")
+
+dff %>% summary_factorlist("complication_bin", explanatory, p=TRUE) %>%
+  flextable::regulartable() %>% flextable::theme_zebra()
+
+
+#generamos insulina como factor y le damos los distintos niveles
+
+dff <- dff %>%
+  mutate(insulin = factor(ifelse(insulin=="No",0,
+                          ifelse(insulin=="Down",1,
+                          ifelse(insulin=="Steady",2,3))),
+                          levels = 0:3, labels = c("No","poco","medio","mucho")))
+
+modelo_completo <- glm(as.numeric(complication_bin) ~ age_mid + race + time_in_hospital +
+  num_lab_procedures + num_medications + number_diagnoses + insulin + change + payer_code,
+  family = binomial, data = dff)
+
+modelo_adj2 <- glm(as.numeric(complication_bin) ~ race + time_in_hospital +
+  num_medications + number_diagnoses + insulin + change + payer_code,
+  family = binomial, data = dff)
+
+plot_model(modelo_adj2, p.val="wald") + ylim(-0.5, 3)
+tab_model(modelo_adj2, p.val="wald")
+
+
+```
+
+# Parte 2 · Matching (PSM) con `lalonde` y OR binarios
+
+## Objetivos
+
+-   Estimar puntaje de propensión.
+-   Emparejar 1:1 y 1:2 con caliper.
+-   Evaluar equilibrio (SMD \< 0.1).
+-   Estimar **odds ratios** pre y post.
+
+## Parámetros principales de `matchit`
+
+| Parámetro  | Valores típicos                                                          | Descripción                    |
+|------------------------|------------------------|------------------------|
+| `formula`  | `treat ~ x1 + x2 + …`                                                    | Tratamiento \~ covariables     |
+| `method`   | `"nearest"`, `"optimal"`, `"full"`, `"genetic"`, `"exact"`, `"subclass"` | Algoritmo                      |
+| `distance` | `"logit"`, `"probit"`, `"mahalanobis"`, numérico                         | Distancia usada                |
+| `estimand` | `"ATT"`, `"ATE"`, `"ATC"`                                                | Población objetivo             |
+| `ratio`    | `1`, `2`, `k`                                                            | Nº de controles por tratado    |
+| `caliper`  | num (p.ej. `0.2`)                                                        | Ancho máximo de emparejamiento |
+| `replace`  | TRUE/FALSE                                                               | Con o sin reemplazo            |
+
+## Código (ejecutable)
+
+```{r}
+library(MatchIt)
+library(cobalt)
+library(dplyr)
+library(tibble)
+
+data("lalonde")
+df <- lalonde %>%
+  mutate(
+    re78_med   = median(re78, na.rm = TRUE),
+    outcome_bin = factor(as.integer(re78 > re78_med),
+                         levels = c(0,1),
+                         labels = c("better","not better")),
+    treat = factor(treat,
+                   levels = c(0,1),
+                   labels = c("Non treated","Treated"))
+  )
+
+set.seed(1)
+m11 <- matchit(treat ~ age + educ + race + married + nodegree + re74 + re75,
+               data     = df,
+               method   = "nearest",
+               distance = "logit",
+               estimand = "ATT",
+               ratio    = 1,
+               caliper  = 0.2,
+               replace  = FALSE)
+d11 <- match.data(m11)
+
+set.seed(2)
+m12 <- matchit(treat ~ age + educ + race + married + nodegree + re74 + re75,
+               data     = df,
+               method   = "nearest",
+               distance = "logit",
+               estimand = "ATT",
+               ratio    = 2,
+               caliper  = 0.2,
+               replace  = FALSE)
+d12 <- match.data(m12)
+
+love.plot(m11, binary="std", abs=TRUE, thresholds=c(m=.1),
+          var.order="unadjusted", title="SMD — Matching 1:1")
+love.plot(m12, binary="std", abs=TRUE, thresholds=c(m=.1),
+          var.order="unadjusted", title="SMD — Matching 1:2")
+
+or_ci <- function(data){
+  fit <- glm(I(outcome_bin=="not better") ~ treat, data = data, family = binomial())
+  b   <- coef(summary(fit))["treatTreated","Estimate"]
+  se  <- coef(summary(fit))["treatTreated","Std. Error"]
+  data.frame(OR=exp(b), LCL=exp(b-1.96*se), UCL=exp(b+1.96*se))
+}
+res_pre <- or_ci(df); res_11 <- or_ci(d11); res_12 <- or_ci(d12)
+tibble(Context=c("Pre","Post 1:1","Post 1:2"),
+       OR=c(res_pre$OR,res_11$OR,res_12$OR),
+       LCL95=c(res_pre$LCL,res_11$LCL,res_12$LCL),
+       UCL95=c(res_pre$UCL,res_11$UCL,res_12$UCL))
+```
+
+# Parte 3 · Minería de procesos con “ArtificialPatientTreatment.csv”
+
+## Objetivos
+
+-   Construir **event log** válido.
+-   Generar **secuencia de eventos**, mapa y animación.
+-   Calcular métricas de flujo.
+-   Comparar rutas por subgrupos.
+
+## Conceptos clave
+
+| Concepto  | Definición                           | Columna típica              |
+|------------------------|------------------------|------------------------|
+| Caso      | Identificador del proceso individual | `patient_id` / `case_id`    |
+| Actividad | Tipo de evento realizado             | `activity` / `action`       |
+| Timestamp | Marca temporal                       | `timestamp`                 |
+| Recurso   | Agente que ejecuta actividad         | `resource` / `org_resource` |
+| Instancia | ID único del evento dentro del caso  | `activity_instance`         |
+| Lifecycle | Estado del evento                    | `status` = start/complete   |
+| Atributos | Variables extra por evento           | `cost`, `duration`, etc.    |
+| Traza     | Secuencia de actividades del caso    | derivada                    |
+
+## Código (ejecutable)
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(bupaR)
+library(processmapR)
+library(edeaR)
+library(processanimateR)
+library(processmonitR)
+library(lubridate)
+
+# 1) Carga
+elog0 <- read_csv("datos/ArtificialPatientTreatment.csv", show_col_types = FALSE)
+
+# 2) Limpieza nombres
+names(elog0) <- 
+  chartr(old=" /-/:",new="____",tolower(str_trim(str_squish(names(elog0))))) 
+
+# 3) Identificar columnas candidatas
+cands_case <- intersect(names(elog0), c("case","case_id","patient","patient_id","trace","id","encounter"))
+cands_act  <- intersect(names(elog0), c("activity","treatment","event","event_name","task","action"))
+cands_time <- intersect(names(elog0), c("timestamp","time","event_time","datetime","date"))
+cands_res  <- intersect(names(elog0), c("resource","staff","provider","user","org_resource"))
+cands_cost <- intersect(names(elog0), c("cost","duration","amount","charge"))
+
+stopifnot(length(cands_case) >= 1, length(cands_act) >= 1, length(cands_time) >= 1)
+
+elog <- elog0 %>%
+  mutate(
+    .case_id  = .data[[cands_case[1]]],
+    .activity = as.character(.data[[cands_act[1]]]),
+    .ts_raw   = .data[[cands_time[1]]],
+    .resource = if(length(cands_res) >= 1) as.character(.data[[cands_res[1]]]) else NA_character_,
+    .cost     = if(length(cands_cost) >= 1) as.numeric(.data[[cands_cost[1]]]) else NA_real_
+  ) %>%
+  mutate(timestamp = suppressWarnings(lubridate::as_datetime(.ts_raw))) %>%
+  filter(!is.na(timestamp))
+
+# 4) Asignar cost si es NA
+if(all(is.na(elog$.cost))){
+  set.seed(123)
+  act_cost <- elog %>% distinct(.activity) %>%
+    mutate(c_base = runif(n(), 100, 500))
+  elog <- elog %>%
+    left_join(act_cost, by = ".activity") %>%
+    mutate(.cost = c_base) %>%
+    select(-c_base)
+}
+
+# 5) Eventlog
+elog_bupa <- elog %>%arrange(timestamp) %>% mutate(activity_instance=1:nrow(.),status=ifelse(action=="Final Consult","complete","in progress")) %>% 
+  eventlog(
+    case_id    = ".case_id",
+    activity_id = ".activity",
+    timestamp   = "timestamp",
+    activity_instance_id= "activity_instance",
+    resource_id = if(".resource" %in% names(elog)) ".resource" else NULL,
+    lifecycle_id="status"
+  )
+
+
+# 6) Métricas y estadísticas
+throughput <- throughput_time(elog_bupa, level = "case")
+
+freq_act <- activity_frequency(elog_bupa, level = "activity")
+
+# 7) Mapas de proceso
+map_full <- process_map(elog_bupa,type_nodes = frequency("relative-case"),sec_nodes = frequency("absolute-case"),type_edges = performance(median, "hours", color_edges = "Purples"),
+                        sec_edges = frequency("absolute-case"),rankdir = "TB")
+
+
+
+
+# 8) Agrupar por variable dicotómica (ejemplo: alto costo vs bajo)
+case_cost <- throughput %>% rename( total_time = throughput_time)
+med_t <- median(case_cost$total_time, na.rm = TRUE)
+case_cost <- case_cost %>% mutate(high_time = if_else(total_time >= med_t, "High","Low"))
+
+elog_bupa2 <- elog_bupa %>% left_join(case_cost, by = ".case_id")
+
+map_high <- process_map(elog_bupa2 %>% filter_case(log=elog_bupa2,
+                                                   cases=case_cost %>% filter(high_time == "High") %>% pull(.case_id),
+                                                   reverse=FALSE))
+
+
+map_low <- process_map(elog_bupa2 %>% filter_case(log=elog_bupa2,
+                                                  cases=case_cost %>% filter(high_time == "Low") %>% pull(.case_id),
+                                                  reverse=FALSE))
+
+elog_bupa2 %>% mutate(coste_alto=ifelse(.cost>median(.cost),"alto","bajo"))->elog_bupa3
+# 9) Animación
+pa <- processanimateR::animate_process(elog_bupa3,
+
+legend = "color",
+                                 mapping=token_aes(color=token_scale("coste_alto",scale = "ordinal",range = RColorBrewer::brewer.pal(2, "Paired"))))
+pa
+
+# 10) Cuadros de mando sugeridos
+freq_act %>% arrange(desc(absolute))
+
+
+elog_bupa %>% trace_explorer()
+elog_bupa %>% precedence_matrix() %>% plot()
+
+library(processmonitR)
+elog_bupa %>% activity_dashboard()
+elog_bupa %>% resource_dashboard()
+
+```
