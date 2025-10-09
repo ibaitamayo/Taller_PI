@@ -32,7 +32,7 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ## Tabla de funciones
 
 | Función                       | Librería  | Propósito                | Ejemplo mínimo                                                              |
-|------------------|------------------|------------------|------------------|
+|-------------------------------|-----------|--------------------------|-----------------------------------------------------------------------------|
 | `read.csv`                    | base      | Cargar CSV               | `df <- read.csv("datos/diabetic_data.csv")`                                 |
 | `mutate`, `if_else`           | dplyr     | Derivar variables        | `dff <- df %>% mutate(complication_bin=if_else(readmitted=="<30","1","0"))` |
 | `summary_factorlist`          | finalfit  | Univariantes con p       | `summary_factorlist("complication_bin", explanatory, p=TRUE)`               |
@@ -100,7 +100,7 @@ tab_model(modelo_adj2, p.val="wald")
 ## Parámetros principales de `matchit`
 
 | Parámetro  | Valores típicos                                                          | Descripción                    |
-|------------------------|------------------------|------------------------|
+|------------|--------------------------------------------------------------------------|--------------------------------|
 | `formula`  | `treat ~ x1 + x2 + …`                                                    | Tratamiento \~ covariables     |
 | `method`   | `"nearest"`, `"optimal"`, `"full"`, `"genetic"`, `"exact"`, `"subclass"` | Algoritmo                      |
 | `distance` | `"logit"`, `"probit"`, `"mahalanobis"`, numérico                         | Distancia usada                |
@@ -181,7 +181,7 @@ tibble(Context=c("Pre","Post 1:1","Post 1:2"),
 ## Conceptos clave
 
 | Concepto  | Definición                           | Columna típica              |
-|------------------------|------------------------|------------------------|
+|-----------|--------------------------------------|-----------------------------|
 | Caso      | Identificador del proceso individual | `patient_id` / `case_id`    |
 | Actividad | Tipo de evento realizado             | `activity` / `action`       |
 | Timestamp | Marca temporal                       | `timestamp`                 |
